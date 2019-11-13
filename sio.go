@@ -21,6 +21,7 @@ import (
 	"syscall"
 	"time"
 	"unsafe"
+	"github.com/pkg/term/termios"
 )
 
 // Addr represents a network end point address.
@@ -93,6 +94,12 @@ func Open(dev string, rate uint32) (p *Port, err error) {
 	}
 
 	return &Port{f, &addr{dev, dev}}, nil
+}
+
+func (p *Port) Sync() error {
+	fd := p.f.Fd()
+
+	return termios.Tcdrain(fd)
 }
 
 // Implementation of net.Conn
