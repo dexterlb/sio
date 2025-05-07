@@ -246,7 +246,7 @@ func (p *Port) setRS485Params(params *RS485Params) (err error) {
 	if _, _, errno := syscall.Syscall6(
 		syscall.SYS_IOCTL,
 		uintptr(fd),
-		uintptr(syscall.TIOCGRS485),
+		uintptr(syscall.TIOCSRS485),
 		uintptr(unsafe.Pointer(&ctl)),
 		0,
 		0,
