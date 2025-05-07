@@ -1,3 +1,4 @@
+//go:build linux
 // +build linux
 
 /*
@@ -21,6 +22,7 @@ import (
 	"syscall"
 	"time"
 	"unsafe"
+
 	"github.com/pkg/term/termios"
 )
 
@@ -50,6 +52,37 @@ type Port struct {
 	a *addr
 }
 
+const (
+	termios_POSIX_VDISABLE = 0xff
+	termios_CCTS_OFLOW     = 0x00010000
+	termios_CRTS_IFLOW     = 0x00020000
+	termios_CDTR_IFLOW     = 0x00040000
+	termios_CDSR_OFLOW     = 0x00080000
+	termios_CMSPAR         = 0x40000000
+)
+
+type RS485Params struct {
+	ENABLED               bool
+	RTS_ON_SEND           bool
+	RTS_AFTER_SEND        bool
+	RX_DURING_TX          bool
+	TERMINATE_BUS         bool
+	ADDRB                 bool
+	ADDR_RECV             bool
+	ADDR_DEST             bool
+	MODE_RS422            bool
+	DELAY_RTS_BEFORE_SEND uint32
+	DELAY_RTS_AFTER_SEND  uint32
+}
+
+type FlowControlSettings struct {
+	RS485Params RS485Params
+	EnableRTS   bool
+	EnableCTS   bool
+	EnableDTR   bool
+	EnableDSR   bool
+}
+
 // Open returns a Port implementing net.Conn or an error if any. The Port
 // behavior is like of the merged returns of net.DialTCP and
 // net.ListenTCP.Accept, i.e. the net.Conn represents a bidirectional byte
@@ -58,16 +91,16 @@ type Port struct {
 //
 // Ex.: sio.Open("/dev/ttyS0", syscall.B115200)
 func Open(dev string, rate uint32) (p *Port, err error) {
-	return openPort(dev, rate, nil)
+	return openPort(dev, rate, nil, FlowControlSettings{})
 }
 
 // OpenWithTimeout works like Open but sets a timeout for Read() operations.
 // Set the timeout to 0 for non-blocking operation.
-func OpenWithTimeout(dev string, rate uint32, readTimeout time.Duration) (p *Port, err error) {
-	return openPort(dev, rate, &readTimeout)
+func OpenWithTimeout(dev string, rate uint32, readTimeout time.Duration, fcs FlowControlSettings) (p *Port, err error) {
+	return openPort(dev, rate, &readTimeout, fcs)
 }
 
-func openPort(dev string, rate uint32, readTimeout *time.Duration) (p *Port, err error) {
+func openPort(dev string, rate uint32, readTimeout *time.Duration, fcs FlowControlSettings) (p *Port, err error) {
 	var f *os.File
 	defer func() {
 		if err != nil && f != nil {
@@ -79,10 +112,28 @@ func openPort(dev string, rate uint32, readTimeout *time.Duration) (p *Port, err
 		return nil, err
 	}
 
+	cflag := syscall.CS8 | syscall.CREAD | syscall.CLOCAL | rate
+
+	if fcs.EnableRTS {
+		cflag |= termios_CRTS_IFLOW
+	}
+
+	if fcs.EnableCTS {
+		cflag |= termios_CCTS_OFLOW
+	}
+
+	if fcs.EnableDTR {
+		cflag |= termios_CDTR_IFLOW
+	}
+
+	if fcs.EnableDSR {
+		cflag |= termios_CDSR_OFLOW
+	}
+
 	fd := f.Fd()
 	t := syscall.Termios{
 		Iflag:  syscall.IGNPAR,
-		Cflag:  syscall.CS8 | syscall.CREAD | syscall.CLOCAL | rate,
+		Cflag:  cflag,
 		Cc:     [32]uint8{syscall.VMIN: 1},
 		Ispeed: rate,
 		Ospeed: rate,
@@ -109,7 +160,16 @@ func openPort(dev string, rate uint32, readTimeout *time.Duration) (p *Port, err
 		return
 	}
 
-	return &Port{f, &addr{dev, dev}}, nil
+	p = &Port{f, &addr{dev, dev}}
+
+	if fcs.RS485Params.ENABLED {
+		err = p.setRS485Params(&fcs.RS485Params)
+		if err != nil {
+			return
+		}
+	}
+
+	return p, nil
 }
 
 func (p *Port) Sync() error {
@@ -156,6 +216,46 @@ func (p *Port) SetReadDeadline(t time.Time) error {
 // Implementation of net.Conn
 func (p *Port) SetWriteDeadline(t time.Time) error {
 	return nil // Ignored
+}
+
+type kernelRS485Struct struct {
+	Flags              uint32
+	DelayRTSBeforeSend uint32
+	DelayRTSAfterSend  uint32
+	Padding            [5]uint32
+}
+
+func (p *Port) setRS485Params(params *RS485Params) (err error) {
+	var ctl kernelRS485Struct
+	fd := p.f.Fd()
+
+	ctl.DelayRTSBeforeSend = params.DELAY_RTS_BEFORE_SEND
+	ctl.DelayRTSAfterSend = params.DELAY_RTS_AFTER_SEND
+
+	ctl.Flags = 0
+	ctl.Flags |= (boolToUint32(params.ENABLED) << 0)
+	ctl.Flags |= (boolToUint32(params.RTS_ON_SEND) << 1)
+	ctl.Flags |= (boolToUint32(params.RTS_AFTER_SEND) << 2)
+	ctl.Flags |= (boolToUint32(params.RX_DURING_TX) << 4)
+	ctl.Flags |= (boolToUint32(params.TERMINATE_BUS) << 5)
+	ctl.Flags |= (boolToUint32(params.ADDRB) << 6)
+	ctl.Flags |= (boolToUint32(params.ADDR_RECV) << 7)
+	ctl.Flags |= (boolToUint32(params.ADDR_DEST) << 8)
+	ctl.Flags |= (boolToUint32(params.MODE_RS422) << 9)
+
+	if _, _, errno := syscall.Syscall6(
+		syscall.SYS_IOCTL,
+		uintptr(fd),
+		uintptr(syscall.TIOCGRS485),
+		uintptr(unsafe.Pointer(&ctl)),
+		0,
+		0,
+		0,
+	); errno != 0 {
+		return errno
+	}
+
+	return nil
 }
 
 func (p *Port) setCtrlSignal(sig int, on bool) (err error) {
@@ -291,4 +391,12 @@ func posixTimeoutValues(readTimeout time.Duration) (vmin uint8, vtime uint8) {
 		}
 	}
 	return minBytesToRead, uint8(readTimeoutInDeci)
+}
+
+func boolToUint32(v bool) uint32 {
+	if v {
+		return 1
+	} else {
+		return 0
+	}
 }
