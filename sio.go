@@ -178,6 +178,12 @@ func (p *Port) Sync() error {
 	return termios.Tcdrain(fd)
 }
 
+func (p *Port) Flush() error {
+	fd := p.f.Fd()
+
+	return termios.Tcflush(fd, termios.TCIFLUSH)
+}
+
 // Implementation of net.Conn
 func (p *Port) Read(b []byte) (n int, err error) {
 	return p.f.Read(b)
