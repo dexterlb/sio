@@ -190,7 +190,7 @@ func (p *Port) FlushOutput() error {
 	return termios.Tcflush(fd, termios.TCOFLUSH)
 }
 
-func (p *Port) FlushInputOutput() error {
+func (p *Port) Flush() error {
 	fd := p.f.Fd()
 
 	return termios.Tcflush(fd, termios.TCIOFLUSH)
